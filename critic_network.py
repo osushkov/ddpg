@@ -14,6 +14,9 @@ class CriticNetwork(snt.AbstractModule):
         self._value = snt.Linear(output_size=1)
         self._output_activation = output_activation
 
+        self._value_range = tf.constant(1000.0, dtype=tf.float32)
+        self._value_mean = tf.constant(-1000.0, dtype=tf.float32)
+
     def _build(self, state, action):
         state_flattened = snt.BatchFlatten()(state)
         action_flattened = snt.BatchFlatten()(action)
@@ -22,7 +25,7 @@ class CriticNetwork(snt.AbstractModule):
         l1 = self._layer_activations(l1)
 
         net_out = self._network(l1)
-        value = self._output_activation(self._value(net_out))
+        value = (tf.nn.tanh(self._value(net_out)) * self._value_range) + self._value_mean
 
         return value
 

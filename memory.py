@@ -33,7 +33,6 @@ class Memory(object):
         self._rewards = np.zeros(max_capacity)
         self._next_states = np.zeros(state_shape)
         self._is_terminal = np.zeros(max_capacity, dtype=np.bool)
-        self._have_td_error = np.zeros(max_capacity, dtype=np.bool)
         self._p_choice = np.full(max_capacity, 1.0)
 
         self._steps_since_average_updated = 0
@@ -54,14 +53,14 @@ class Memory(object):
         if self._insert_index >= self._max_capacity:
             self._insert_index = 0
 
-        self._steps_since_average_updated += 1
-        if self._steps_since_average_updated > 64:
-            self._average_p = self._calculate_average_p()
-            self._steps_since_average_updated = 0
+        # self._steps_since_average_updated += 1
+        # if self._steps_since_average_updated > 64:
+        #     self._average_p = self._calculate_average_p()
+        #     self._steps_since_average_updated = 0
 
-        self._psum += self._average_p
-        if self._num_entries == self._max_capacity:
-            self._psum -= self._p_choice[self._insert_index]
+        # self._psum += self._average_p
+        # if self._num_entries == self._max_capacity:
+        #     self._psum -= self._p_choice[self._insert_index]
 
         self._p_choice[self._insert_index] = self._average_p
         self._states[self._insert_index] = state
@@ -78,20 +77,14 @@ class Memory(object):
 
         if self._num_entries < self._max_capacity:
             self._num_entries += 1
-        psum = np.sum(self._p_choice[:self._num_entries])
-        print("!! {} {}".format(psum, self._psum))
 
     def sample(self, num_samples):
-        psum = np.sum(self._p_choice[:self._num_entries])
-        print("{} {}".format(psum, self._psum))
-        assert(math.fabs(self._psum - psum) < 10.0)
-
         indices = np.random.choice(np.arange(self._num_entries),
-                                   size=num_samples,
-                                   p=(self._p_choice[:self._num_entries] / self._psum))
+                                   size=num_samples)
+                                #    p=(self._p_choice[:self._num_entries] / self._psum))
 
         self._prev_sample = indices
-        return MemoryChunk(self._weights(self._p_choice[indices], self._psum),
+        return MemoryChunk(np.ones(num_samples),  # self._weights(self._p_choice[indices], self._psum),
                            self._states[indices],
                            self._actions[indices],
                            self._rewards[indices],
@@ -99,21 +92,10 @@ class Memory(object):
                            self._is_terminal[indices])
 
     def update_p_choice(self, td_errors):
-        psum = np.sum(self._p_choice[:self._num_entries])
-        print("00 !! {} {}".format(psum, self._psum))
-
-        new_pchoice = np.power(np.abs(td_errors) + _P_CHOICE_EPSILON, self._alpha)
-        delta = np.sum(new_pchoice - self._p_choice[self._prev_sample])
-
-        print("delta: {}".format(delta))
-        print("sample: {}".format(self._prev_sample))
-        self._psum += delta
-        self._p_choice[self._prev_sample] = new_pchoice
-        # self._psum += np.sum(self._p_choice[self._prev_sample])
-        self._have_td_error[self._prev_sample] = True
-
-        psum = np.sum(self._p_choice[:self._num_entries])
-        print("11 !! {} {}".format(psum, self._psum))
+        pass
+        # new_pchoice = np.power(np.abs(td_errors) + _P_CHOICE_EPSILON, self._alpha)
+        # self._p_choice[self._prev_sample] = new_pchoice
+        # self._psum = np.sum(self._p_choice[:self._num_entries])
 
     def _calculate_average_p(self):
         return np.mean(self._p_choice[:self._num_entries])

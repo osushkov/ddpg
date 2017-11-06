@@ -6,11 +6,11 @@ import time
 
 import run_loop
 import decaying_value
-import dqn_learner
+import ddpg_agent
 import memory
 
 
-TRAIN_EPISODES = 3000
+TRAIN_EPISODES = 4000
 MAX_STEPS_PER_EPISODE = 1000
 
 
@@ -37,13 +37,13 @@ def _build_observers():
     return observers
 
 
-env = gym.make('MountainCarContinuous-v0')
+env = gym.make('Pendulum-v0')
 # env = gym.make('CartPole-v0')
 
-exploration_rate = decaying_value.DecayingValue(1.0, 0.1, TRAIN_EPISODES)
+exploration_rate = decaying_value.DecayingValue(0.5, 0.05, TRAIN_EPISODES)
 beta = decaying_value.DecayingValue(0.4, 1.0, TRAIN_EPISODES)
 memory = memory.Memory(50000, env.observation_space.high.shape, 0.6, beta)
-agent = dqn_learner.DQNLearner(env.action_space, env.observation_space, exploration_rate, memory)
+agent = ddpg_agent.DDPGAgent(env.action_space, env.observation_space, exploration_rate, memory)
 observers = _build_observers()
 
 run_loop.run_loop(env, agent, TRAIN_EPISODES, MAX_STEPS_PER_EPISODE, observers)

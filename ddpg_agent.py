@@ -1,7 +1,8 @@
 
 import agent
 import memory
-import q_network
+import actor_network
+import critic_network
 
 import math
 import random
@@ -10,26 +11,49 @@ import tensorflow as tf
 
 from gym.spaces.discrete import Discrete
 
-_ACTOR_LAYERS = (32,16)
+_ACTOR_LAYERS = (128,64)
 _ACTOR_ACTIVATION = tf.nn.elu
 
-_CRITIC_LAYERS = (32,16)
+_CRITIC_LAYERS = (128,64)
 _CRITIC_LAYER_ACTIVATION = tf.nn.elu
 _CRITIC_OUTPUT_ACTIVATION = tf.identity
 
-_TARGET_UPDATE_RATE = 5000
+_TARGET_UPDATE_RATE = 1000
 _LEARN_BATCH_SIZE = 64
 _DISCOUNT = 0.98
+
+
+# Taken from https://github.com/openai/baselines/blob/master/baselines/ddpg/noise.py, which is
+# based on http://math.stackexchange.com/questions/1287634/implementing-ornstein-uhlenbeck-in-matlab
+class OrnsteinUhlenbeckActionNoise:
+    def __init__(self, mu, sigma=0.3, theta=.15, dt=1e-2, x0=None):
+        self.theta = theta
+        self.mu = mu
+        self.sigma = sigma
+        self.dt = dt
+        self.x0 = x0
+        self.reset()
+
+    def __call__(self):
+        x = self.x_prev + self.theta * (self.mu - self.x_prev) * self.dt + \
+                self.sigma * np.sqrt(self.dt) * np.random.normal(size=self.mu.shape)
+        self.x_prev = x
+        return x
+
+    def reset(self):
+        self.x_prev = self.x0 if self.x0 is not None else np.zeros_like(self.mu)
+
+    def __repr__(self):
+        return 'OrnsteinUhlenbeckActionNoise(mu={}, sigma={})'.format(self.mu, self.sigma)
 
 
 class DDPGAgent(agent.Agent):
 
     def __init__(self, action_space, observation_space, exploration_rate, memory):
-        assert isinstance(action_space, Discrete)
-
         self._action_space = action_space
         self._observation_space = observation_space
         self._exploration_rate = exploration_rate
+        self._actor_noise = OrnsteinUhlenbeckActionNoise(mu=np.zeros(self._action_space.shape[0]))
 
         self._state_shape = observation_space.high.shape
         self._memory = memory
@@ -68,11 +92,12 @@ class DDPGAgent(agent.Agent):
         self._last_state = observation
         self._last_action = action
 
-        return action
+        return action + self._actor_noise()
 
     def feedback(self, resulting_state, reward, episode_done):
+        # print("reward: {}".format(reward))
+        resulting_state = resulting_state.reshape((1,) + self._state_shape)
         resulting_state = self._normalised_state(resulting_state)
-        reward /= 50.0
 
         if episode_done:
             resulting_state = None
@@ -90,7 +115,7 @@ class DDPGAgent(agent.Agent):
         feed_dict = {
                 self._weights : mem_chunk.weights,
                 self._state : mem_chunk.states,
-                self._action : mem_chunk.actions,
+                self._action : mem_chunk.actions.reshape(-1, self._action_space.shape[0]),
                 self._reward : mem_chunk.rewards,
                 self._next_state : mem_chunk.next_states,
                 self._target_is_terminal : mem_chunk.is_terminal,
@@ -99,11 +124,12 @@ class DDPGAgent(agent.Agent):
         self._learn_iters_since_update += 1
         with self._sess.as_default():
             _, _, td_error = self._sess.run((self._actor_optimizer, self._critic_optimizer,
-                                                self._td_error), feed_dict=feed_dict)
+                                             self._td_error), feed_dict=feed_dict)
 
             self._memory.update_p_choice(td_error)
 
             if self._learn_iters_since_update >= _TARGET_UPDATE_RATE:
+                print("updating target")
                 self._sess.run(self._target_update_ops)
                 self._learn_iters_since_update = 0
 
@@ -120,17 +146,17 @@ class DDPGAgent(agent.Agent):
                                                             action_ranges,
                                                             _ACTOR_ACTIVATION)
 
-            self._critic = actor_network.ActorNetwork(_CRITIC_LAYERS,
-                                                      _CRITIC_LAYER_ACTIVATION,
-                                                      _CRITIC_OUTPUT_ACTIVATION)
-            self._target_critic = actor_network.ActorNetwork(_CRITIC_LAYERS,
-                                                             _CRITIC_LAYER_ACTIVATION,
-                                                             _CRITIC_OUTPUT_ACTIVATION)
+            self._critic = critic_network.CriticNetwork(_CRITIC_LAYERS,
+                                                        _CRITIC_LAYER_ACTIVATION,
+                                                        _CRITIC_OUTPUT_ACTIVATION)
+            self._target_critic = critic_network.CriticNetwork(_CRITIC_LAYERS,
+                                                               _CRITIC_LAYER_ACTIVATION,
+                                                               _CRITIC_OUTPUT_ACTIVATION)
 
             self._state = tf.placeholder(
                     tf.float32, shape=((_LEARN_BATCH_SIZE, ) + self._state_shape))
             self._action =  tf.placeholder(
-                    tf.float32, shape=(_LEARN_BATCH_SIZE, self._action_space.n))
+                    tf.float32, shape=(_LEARN_BATCH_SIZE, self._action_space.shape[0]))
             self._reward = tf.placeholder(tf.float32, shape=_LEARN_BATCH_SIZE)
             self._next_state = tf.placeholder(
                     tf.float32, shape=((_LEARN_BATCH_SIZE, ) + self._state_shape))
@@ -142,39 +168,36 @@ class DDPGAgent(agent.Agent):
             self._build_acting_network()
             self._build_actor_learning_network()
             self._build_critic_learning_network()
-
-            self._build_target_network()
-            self._build_learn_loss()
             self._build_update_ops()
 
             self._init_op = tf.global_variables_initializer()
 
     def _build_acting_network(self):
         self._act_observation = tf.placeholder(tf.float32, shape=((1, ) + self._state_shape))
-        self._act_noise = tf.placeholder(tf.float32, shape=(1,))
+        self._act_noise = tf.placeholder(tf.float32)
 
-        self._act_output = (self._actor(self._act_observation) +
-                            tf.random_normal(shape=(1,), stddev=self._act_noise))
+        self._act_output = self._actor(self._act_observation)
+                            # tf.random_normal(shape=(1,), stddev=self._act_noise))
 
     def _build_actor_learning_network(self):
         action = self._actor(self._state)
 
         # TODO: should this be the critic or target_critic?
-        qvalue = self._critic(self._state, action)
-        self._actor_loss = -tf.log(qvalue) * self._normalized_weights
+        qvalue = self._target_critic(self._state, action)
+        self._actor_loss = -qvalue # * self._normalized_weights
 
         opt = tf.train.AdamOptimizer(0.0001)
         self._actor_optimizer = opt.minimize(self._actor_loss,
                                              var_list=self._actor.get_variables())
 
     def _build_critic_learning_network(self):
-        critic_output = self._critic(self._state, self._action)
+        critic_output = tf.reshape(self._critic(self._state, self._action), [-1])
 
         next_state_action = self._target_actor(self._next_state)
-        next_state_qvalue = self._target_critic(self._next_state, next_state_action)
+        next_state_qvalue = tf.reshape(self._target_critic(self._next_state, next_state_action), [-1])
 
         terminating_target = self._reward
-        intermediate_target = self._reward + next_state_qvalue * _DISCOUNT)
+        intermediate_target = self._reward + next_state_qvalue * _DISCOUNT
         desired_output = tf.stop_gradient(
             tf.where(self._target_is_terminal, terminating_target, intermediate_target))
 
