@@ -11,16 +11,16 @@ import tensorflow as tf
 
 from gym.spaces.discrete import Discrete
 
-_ACTOR_LAYERS = (128,64)
-_ACTOR_ACTIVATION = tf.nn.elu
+_ACTOR_LAYERS = (400,300)
+_ACTOR_ACTIVATION = tf.nn.relu
 
-_CRITIC_LAYERS = (128,64)
-_CRITIC_LAYER_ACTIVATION = tf.nn.elu
+_CRITIC_LAYERS = (400, 400)
+_CRITIC_LAYER_ACTIVATION = tf.nn.relu
 _CRITIC_OUTPUT_ACTIVATION = tf.identity
 
 _TARGET_UPDATE_RATE = 1000
 _LEARN_BATCH_SIZE = 64
-_DISCOUNT = 0.98
+_DISCOUNT = 0.99
 
 
 # Taken from https://github.com/openai/baselines/blob/master/baselines/ddpg/noise.py, which is
@@ -69,7 +69,7 @@ class DDPGAgent(agent.Agent):
         self._sess = tf.Session(graph=self._graph)
         with self._sess.as_default():
             self._sess.run(self._init_op)
-            self._sess.run(self._target_update_ops)
+            self._sess.run(self._target_copy_ops)
 
     def initialize_episode(self, episode_count):
         self._cur_exploration = self._exploration_rate(episode_count)
@@ -95,6 +95,7 @@ class DDPGAgent(agent.Agent):
         return action + self._actor_noise()
 
     def feedback(self, resulting_state, reward, episode_done):
+        reward /= 100.0
         # print("reward: {}".format(reward))
         resulting_state = resulting_state.reshape((1,) + self._state_shape)
         resulting_state = self._normalised_state(resulting_state)
@@ -108,7 +109,7 @@ class DDPGAgent(agent.Agent):
         self._learning_flag = learning_flag
 
     def _learn(self):
-        if self._memory.num_entries() < self._memory.capacity() / 10:
+        if self._memory.num_entries() < _LEARN_BATCH_SIZE: #self._memory.capacity() / 10:
             return
 
         mem_chunk = self._memory.sample(_LEARN_BATCH_SIZE)
@@ -123,15 +124,17 @@ class DDPGAgent(agent.Agent):
 
         self._learn_iters_since_update += 1
         with self._sess.as_default():
-            _, _, td_error = self._sess.run((self._actor_optimizer, self._critic_optimizer,
-                                             self._td_error), feed_dict=feed_dict)
+            _, _, td_error, critic_loss, co = self._sess.run((self._actor_optimizer, self._critic_optimizer,
+                                             self._td_error, self._critic_loss, self._critic_output), feed_dict=feed_dict)
 
             self._memory.update_p_choice(td_error)
+            self._sess.run(self._target_update_ops)
 
-            if self._learn_iters_since_update >= _TARGET_UPDATE_RATE:
-                print("updating target")
-                self._sess.run(self._target_update_ops)
-                self._learn_iters_since_update = 0
+            # print("critic loss: {}".format(critic_loss))
+            # if self._learn_iters_since_update >= _TARGET_UPDATE_RATE:
+                # print("updating target")
+                # self._sess.run(self._target_update_ops)
+                # self._learn_iters_since_update = 0
 
     def _build_graph(self):
         self._graph = tf.Graph()
@@ -168,6 +171,8 @@ class DDPGAgent(agent.Agent):
             self._build_acting_network()
             self._build_actor_learning_network()
             self._build_critic_learning_network()
+
+            self._build_copy_ops()
             self._build_update_ops()
 
             self._init_op = tf.global_variables_initializer()
@@ -183,7 +188,7 @@ class DDPGAgent(agent.Agent):
         action = self._actor(self._state)
 
         # TODO: should this be the critic or target_critic?
-        qvalue = self._target_critic(self._state, action)
+        qvalue = self._critic(self._state, action)
         self._actor_loss = -qvalue # * self._normalized_weights
 
         opt = tf.train.AdamOptimizer(0.0001)
@@ -192,6 +197,7 @@ class DDPGAgent(agent.Agent):
 
     def _build_critic_learning_network(self):
         critic_output = tf.reshape(self._critic(self._state, self._action), [-1])
+        self._critic_output = critic_output
 
         next_state_action = self._target_actor(self._next_state)
         next_state_qvalue = tf.reshape(self._target_critic(self._next_state, next_state_action), [-1])
@@ -202,27 +208,53 @@ class DDPGAgent(agent.Agent):
             tf.where(self._target_is_terminal, terminating_target, intermediate_target))
 
         self._td_error = desired_output - critic_output
-        self._critic_loss = tf.losses.mean_squared_error(desired_output, critic_output,
-                                                         weights=self._normalized_weights)
+        self._critic_loss = tf.losses.mean_squared_error(desired_output, critic_output)
 
-        opt = tf.train.AdamOptimizer(0.0001)
+        opt = tf.train.AdamOptimizer(0.001)
         self._critic_optimizer = opt.minimize(self._critic_loss,
                                               var_list=self._critic.get_variables())
 
     def _build_update_ops(self):
         actor_vars = self._actor.get_variables()
         actor_target_vars = self._target_actor.get_variables()
+        tau = 0.001
 
         self._target_update_ops = []
+
         for src_var, dst_var in zip(actor_vars, actor_target_vars):
             self._target_update_ops.append(
-                    tf.assign(dst_var, src_var, validate_shape=True, use_locking=True))
+                dst_var.assign(tf.multiply(src_var, tau) + tf.multiply(dst_var, 1.0 - tau)))
+
+        # for src_var, dst_var in zip(actor_vars, actor_target_vars):
+        #     self._target_update_ops.append(
+        #             tf.assign(dst_var, src_var, validate_shape=True, use_locking=True))
 
         critic_vars = self._critic.get_variables()
         critic_target_vars = self._target_critic.get_variables()
 
         for src_var, dst_var in zip(critic_vars, critic_target_vars):
             self._target_update_ops.append(
+                dst_var.assign(tf.multiply(src_var, tau) + tf.multiply(dst_var, 1.0 - tau)))
+
+        # for src_var, dst_var in zip(critic_vars, critic_target_vars):
+        #     self._target_update_ops.append(
+        #             tf.assign(dst_var, src_var, validate_shape=True, use_locking=True))
+
+    def _build_copy_ops(self):
+        actor_vars = self._actor.get_variables()
+        actor_target_vars = self._target_actor.get_variables()
+
+        self._target_copy_ops = []
+
+        for src_var, dst_var in zip(actor_vars, actor_target_vars):
+            self._target_copy_ops.append(
+                    tf.assign(dst_var, src_var, validate_shape=True, use_locking=True))
+
+        critic_vars = self._critic.get_variables()
+        critic_target_vars = self._target_critic.get_variables()
+
+        for src_var, dst_var in zip(critic_vars, critic_target_vars):
+            self._target_copy_ops.append(
                     tf.assign(dst_var, src_var, validate_shape=True, use_locking=True))
 
     def _normalised_state(self, obs):

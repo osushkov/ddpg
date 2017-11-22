@@ -10,7 +10,7 @@ import ddpg_agent
 import memory
 
 
-TRAIN_EPISODES = 4000
+TRAIN_EPISODES = 50000
 MAX_STEPS_PER_EPISODE = 1000
 
 
