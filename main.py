@@ -10,7 +10,7 @@ import ddpg_agent
 import memory
 
 
-TRAIN_EPISODES = 50000
+TRAIN_EPISODES = 500
 MAX_STEPS_PER_EPISODE = 1000
 
 
@@ -41,8 +41,7 @@ env = gym.make('Pendulum-v0')
 # env = gym.make('CartPole-v0')
 
 exploration_rate = decaying_value.DecayingValue(0.5, 0.05, TRAIN_EPISODES)
-beta = decaying_value.DecayingValue(0.4, 1.0, TRAIN_EPISODES)
-memory = memory.Memory(50000, env.observation_space.high.shape, 0.6, beta)
+memory = memory.Memory(50000, env.observation_space.high.shape)
 agent = ddpg_agent.DDPGAgent(env.action_space, env.observation_space, exploration_rate, memory)
 observers = _build_observers()
 
